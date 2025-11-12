@@ -1,0 +1,54 @@
+# .dockerignore para otimizar build da imagem Docker
+
+# Arquivos de build e output
+bin/
+obj/
+out/
+
+# Arquivos do Visual Studio
+.vs/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Arquivos temporários
+*.tmp
+*.temp
+*.log
+
+# Arquivos do sistema
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Docker
+Dockerfile*
+.dockerignore
+
+# Documentação
+README.md
+*.md
+
+# Testes
+**/TestResults/
+**/*Test*/
+
+# NuGet
+*.nupkg
+**/packages/*
+!**/packages/build/
+
+# Node.js (se houver frontend)
+node_modules/
+npm-debug.log*
+
+# Outros
+.env
+.env.local
+.env.*.local

@@ -1,0 +1,93 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tempo-simple-config
+  namespace: monitoring
+data:
+  tempo.yaml: |
+    server:
+      http_listen_port: 3200
+      
+    distributor:
+      receivers:
+        otlp:
+          protocols:
+            http:
+              endpoint: 0.0.0.0:4318
+              
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /tmp/tempo/traces
+          
+    compactor:
+      compaction:
+        block_retention: 24h
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo-simple
+  namespace: monitoring
+  labels:
+    app: tempo-simple
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tempo-simple
+  template:
+    metadata:
+      labels:
+        app: tempo-simple
+    spec:
+      containers:
+      - name: tempo
+        image: grafana/tempo:2.2.0
+        args:
+        - -config.file=/etc/tempo/tempo.yaml
+        ports:
+        - containerPort: 3200
+          name: http
+        - containerPort: 4318
+          name: otlp-http
+        volumeMounts:
+        - name: config
+          mountPath: /etc/tempo
+        - name: storage
+          mountPath: /tmp/tempo
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: config
+        configMap:
+          name: tempo-simple-config
+      - name: storage
+        emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo-simple
+  namespace: monitoring
+  labels:
+    app: tempo-simple
+spec:
+  selector:
+    app: tempo-simple
+  ports:
+  - name: http
+    port: 3200
+    targetPort: 3200
+  - name: otlp-http
+    port: 4318
+    targetPort: 4318
+  type: ClusterIP

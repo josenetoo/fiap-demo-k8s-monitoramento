@@ -1,0 +1,56 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: weather-api-alerts
+  namespace: monitoring
+  labels:
+    prometheus: kube-prometheus
+    role: alert-rules
+    release: prometheus
+spec:
+  groups:
+  - name: weather-api.rules
+    rules:
+    # Alerta de alta latência
+    - alert: WeatherAPIHighLatency
+      expr: histogram_quantile(0.95, rate(weather_request_duration_seconds_bucket[5m])) > 0.5
+      for: 2m
+      labels:
+        severity: warning
+        service: weather-api
+      annotations:
+        summary: "Weather API com alta latência"
+        description: "95th percentile da latência é {{ $value }}s por mais de 2 minutos"
+        
+    # Alerta de alta taxa de erro
+    - alert: WeatherAPIHighErrorRate
+      expr: rate(weather_requests_total{status=~"5.."}[5m]) / rate(weather_requests_total[5m]) > 0.05
+      for: 1m
+      labels:
+        severity: critical
+        service: weather-api
+      annotations:
+        summary: "Weather API com alta taxa de erro"
+        description: "Taxa de erro é {{ $value | humanizePercentage }} por mais de 1 minuto"
+        
+    # Alerta de pod reiniciando
+    - alert: WeatherAPIPodRestarting
+      expr: increase(kube_pod_container_status_restarts_total{pod=~"weather-api-.*"}[10m]) > 2
+      for: 0m
+      labels:
+        severity: warning
+        service: weather-api
+      annotations:
+        summary: "Pod da Weather API reiniciando frequentemente"
+        description: "Pod {{ $labels.pod }} reiniciou {{ $value }} vezes nos últimos 10 minutos"
+        
+    # Alerta de aplicação indisponível
+    - alert: WeatherAPIDown
+      expr: up{job="weather-api-metrics"} == 0
+      for: 1m
+      labels:
+        severity: critical
+        service: weather-api
+      annotations:
+        summary: "Weather API indisponível"
+        description: "A Weather API não está respondendo há mais de 1 minuto"

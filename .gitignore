@@ -1,0 +1,35 @@
+# AWS
+.aws/
+*.pem
+*.ppk
+
+# Kubernetes
+kubeconfig
+*.kubeconfig
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Helm
+charts/
+*.tgz
+
+# Backup files
+*-backup.yaml
+backup/
+
+# Local environment
+.env
+.env.local

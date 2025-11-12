@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: weather-api
+  labels:
+    app: weather-api
+    environment: local
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "80"
+    prometheus.io/path: "/metrics"
+spec:
+  selector:
+    app: weather-api
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+    protocol: TCP
+  type: ClusterIP  # ClusterIP para uso com port-forward
+
+---
+# Opcional: Service com NodePort para acesso direto
+apiVersion: v1
+kind: Service
+metadata:
+  name: weather-api-nodeport
+  labels:
+    app: weather-api
+    environment: local
+    service-type: nodeport
+spec:
+  selector:
+    app: weather-api
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+    nodePort: 30080  # Acesso via localhost:30080
+    protocol: TCP
+  type: NodePort
