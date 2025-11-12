@@ -12,25 +12,26 @@ data:
       filename: /tmp/positions.yaml
       
     clients:
-      - url: http://loki:3100/loki/api/v1/push
+      - url: http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push
+        timeout: 60s
+        backoff_config:
+          min_period: 500ms
+          max_period: 5m
+          max_retries: 10
       
     scrape_configs:
       - job_name: kubernetes-pods
         kubernetes_sd_configs:
           - role: pod
+        pipeline_stages:
+          - cri: {}
         relabel_configs:
+          # Filtrar apenas pods que queremos
           - source_labels:
-              - __meta_kubernetes_pod_controller_name
-            regex: ([0-9a-z-.]+?)(-[0-9a-f]{8,10})?
-            action: replace
-            target_label: __tmp_controller_name
-          - source_labels:
-              - __meta_kubernetes_pod_label_app
-              - __tmp_controller_name
-              - __meta_kubernetes_pod_name
-            regex: ^;*([^;]+)(;.*)?$
-            action: replace
-            target_label: app
+              - __meta_kubernetes_pod_phase
+            regex: Running
+            action: keep
+          # Adicionar labels importantes
           - source_labels:
               - __meta_kubernetes_pod_node_name
             target_label: node_name
@@ -43,12 +44,22 @@ data:
           - source_labels:
               - __meta_kubernetes_pod_container_name
             target_label: container
-          - replacement: /var/log/pods/*$1/*.log
-            separator: /
-            source_labels:
+          - source_labels:
+              - __meta_kubernetes_pod_label_app
+            target_label: app
+          # Configurar path dos logs
+          - source_labels:
               - __meta_kubernetes_pod_uid
               - __meta_kubernetes_pod_container_name
             target_label: __path__
+            separator: /
+            replacement: /var/log/pods/*$1/*.log
+          # Adicionar informações do container
+          - source_labels:
+              - __meta_kubernetes_pod_container_id
+            target_label: container_runtime
+            regex: ^(\S+)://.*$
+            replacement: $1
 
 ---
 apiVersion: apps/v1
@@ -68,11 +79,16 @@ spec:
         app: promtail
     spec:
       serviceAccountName: promtail
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
       containers:
       - name: promtail
         image: grafana/promtail:2.9.0
         args:
         - -config.file=/etc/promtail/promtail.yaml
+        - -log.level=debug
+        - -server.path-prefix=/
         ports:
         - containerPort: 3101
           name: http
@@ -81,8 +97,15 @@ spec:
             cpu: 100m
             memory: 128Mi
           limits:
-            cpu: 200m
-            memory: 256Mi
+            cpu: 500m
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsUser: 0
         volumeMounts:
         - name: config
           mountPath: /etc/promtail
@@ -94,12 +117,11 @@ spec:
           readOnly: true
         - name: positions
           mountPath: /tmp
-        readinessProbe:
-          httpGet:
-            path: /ready
-            port: 3101
-          initialDelaySeconds: 10
-          periodSeconds: 5
+        env:
+        - name: HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
       volumes:
       - name: config
         configMap:
@@ -114,6 +136,8 @@ spec:
         emptyDir: {}
       tolerations:
       - effect: NoSchedule
+        operator: Exists
+      - effect: NoExecute
         operator: Exists
 
 ---
@@ -137,6 +161,10 @@ rules:
   - endpoints
   - pods
   verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources:
+  - configmaps
+  verbs: ["get"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

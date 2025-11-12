@@ -23,7 +23,7 @@ graph TB
         APP[Weather API .NET 8<br/>OpenTelemetry + Prometheus.NET<br/>HPA + Service Monitor]
     end
     
-    subgraph "☁️ AWS EKS Cluster"
+    subgraph "☁️ AWS EKS Cluster (us-west-2)"
         NODES[2x t3.medium nodes<br/>Auto Scaling Group]
         METRICS[Metrics Server<br/>HPA Support]
     end
@@ -127,6 +127,7 @@ docker --version     # Container Runtime
 ```bash
 # Configurar credenciais (usar profile fiapaws)
 export AWS_PROFILE=fiapaws
+export AWS_DEFAULT_REGION=us-west-2  # Oregon - melhor disponibilidade
 aws sts get-caller-identity  # Verificar se está funcionando
 ```
 
@@ -151,12 +152,12 @@ aws sts get-caller-identity  # Verificar se está funcionando
 ```bash
 # Definir variáveis para facilitar os comandos
 export CLUSTER_NAME=fiap-observability
-export AWS_REGION=us-east-1
+export AWS_REGION=us-west-2
 export AWS_PROFILE=fiapaws
 
 # Verificar configuração
 echo "Cluster: $CLUSTER_NAME"
-echo "Region: $AWS_REGION" 
+echo "Region: $AWS_REGION (Oregon)" 
 echo "Profile: $AWS_PROFILE"
 aws sts get-caller-identity --profile $AWS_PROFILE
 ```
@@ -369,35 +370,121 @@ ls -la
 .AddHealthChecks()
 ```
 
-### **Passo 3: Build da Imagem Docker**
+### **Passo 3: Criar ECR Repository**
 ```bash
-# Build da imagem (já temos Dockerfile pronto)
-docker build -t fiap-weather-api:v1 .
+# Criar repositório no ECR
+aws ecr create-repository \
+    --repository-name fiap-weather-api \
+    --region $AWS_REGION \
+    --profile $AWS_PROFILE
+
+# Obter URL do repositório
+export ECR_REGISTRY=$(aws sts get-caller-identity --query Account --output text --profile $AWS_PROFILE).dkr.ecr.$AWS_REGION.amazonaws.com
+export ECR_REPOSITORY=$ECR_REGISTRY/fiap-weather-api
+echo "ECR Repository: $ECR_REPOSITORY"
+```
+
+### **Passo 4: Build e Push da Imagem**
+
+> **🏗️ IMPORTANTE - Arquiteturas**: 
+> - **Mac M1/M2**: Usa arquitetura ARM64
+> - **EKS Nodes**: Usam arquitetura AMD64 (x86_64)
+> - **Solução**: Build cross-platform com `--platform linux/amd64`
+
+```bash
+# Fazer login no ECR
+aws ecr get-login-password --region $AWS_REGION --profile $AWS_PROFILE | \
+    docker login --username AWS --password-stdin $ECR_REGISTRY
+
+# Build da imagem para AMD64 (compatível com nodes EKS)
+# Importante: Mac M1/M2 usa ARM, mas EKS usa AMD64
+docker build --platform linux/amd64 -t $ECR_REPOSITORY:v1 .
 
 # Verificar imagem criada
-docker images | grep fiap-weather
+docker images | grep fiap-weather-api
 
-# ⏰ Explicar enquanto builda:
+# Verificar arquitetura da imagem
+docker inspect $ECR_REPOSITORY:v1 --format='{{.Architecture}}'
+
+# Push para ECR
+docker push $ECR_REPOSITORY:v1
+
+# ⏰ Explicar enquanto faz push:
 # - Multi-stage build
 # - Otimização de layers
 # - .NET 8 runtime vs SDK
+# - ECR como registry privado da AWS
+# - Cross-platform build: Mac ARM → Linux AMD64
 ```
 
-**✅ CHECKPOINT**: Aplicação containerizada
+### **🚨 Troubleshooting ECR**
+
+**Problema 1: Erro de autenticação no ECR**
+```bash
+# Re-fazer login no ECR
+aws ecr get-login-password --region $AWS_REGION --profile $AWS_PROFILE | \
+    docker login --username AWS --password-stdin $ECR_REGISTRY
+
+# Verificar se o repositório existe
+aws ecr describe-repositories --repository-names fiap-weather-api --region $AWS_REGION --profile $AWS_PROFILE
+```
+
+**Problema 2: ImagePullBackOff no Kubernetes**
+```bash
+# Verificar se a imagem existe no ECR
+aws ecr list-images --repository-name fiap-weather-api --region $AWS_REGION --profile $AWS_PROFILE
+
+# Verificar logs do pod
+kubectl describe pod -l app=weather-api
+kubectl logs -l app=weather-api
+```
+
+**Problema 3: Erro de Arquitetura (Mac M1/M2)**
+```bash
+# Se o pod falhar com "exec format error":
+# Verificar arquitetura da imagem
+docker inspect $ECR_REPOSITORY:v1 --format='{{.Architecture}}'
+
+# Se mostrar "arm64", rebuild para amd64:
+docker build --platform linux/amd64 -t $ECR_REPOSITORY:v1 .
+docker push $ECR_REPOSITORY:v1
+
+# Alternativa: Usar buildx para multi-platform
+docker buildx create --use
+docker buildx build --platform linux/amd64 -t $ECR_REPOSITORY:v1 . --push
+```
+
+**✅ CHECKPOINT**: Aplicação containerizada e no ECR
 
 ---
 
 ## 📦 **PARTE 7: Deploy da Aplicação**
 
-### **Passo 1: Deploy da Aplicação**
+### **Passo 1: Atualizar Deployment com Imagem ECR**
 ```bash
-# Aplicar manifests da aplicação (já prontos)
+# Obter Account ID
+export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text --profile $AWS_PROFILE)
+echo "Account ID: $ACCOUNT_ID"
+
+# Substituir ACCOUNT_ID no deployment
+sed -i.bak "s/ACCOUNT_ID/$ACCOUNT_ID/g" k8s/app/deployment.yaml
+
+# Verificar se a substituição funcionou
+grep "image:" k8s/app/deployment.yaml
+```
+
+### **Passo 2: Deploy da Aplicação**
+```bash
+# Aplicar manifests da aplicação
 kubectl apply -f k8s/app/deployment.yaml
 kubectl apply -f k8s/app/service.yaml
 
-# Verificar
+# Verificar deployment
 kubectl get pods -l app=weather-api
 kubectl get svc weather-api
+
+# Aguardar pods ficarem prontos
+kubectl wait --for=condition=ready pod -l app=weather-api --timeout=300s
 ```
 
 ### **Passo 4: Testar Aplicação**
@@ -512,32 +599,49 @@ rate(container_cpu_usage_seconds_total{pod=~"weather-api-.*"}[5m]) * 100
 
 ### **Passo 1: Instalar Loki**
 ```bash
-# Aplicar Loki (já pronto)
+# Aplicar Loki otimizado para EKS
 kubectl apply -f k8s/monitoring/loki.yaml
 
-# Aplicar Promtail para coleta de logs
+# Aplicar Promtail otimizado para EKS
 kubectl apply -f k8s/monitoring/promtail.yaml
+
+# Aguardar Loki ficar pronto
+kubectl wait --for=condition=ready pod -l app=loki -n monitoring --timeout=300s
 ```
 
 ### **Passo 2: Verificar Instalação**
 ```bash
-# Ver pods do Loki
-kubectl get pods -n monitoring | grep loki
-
-# Ver pods do Promtail
-kubectl get pods -n monitoring | grep promtail
+# Ver pods do Loki e Promtail
+kubectl get pods -n monitoring | grep -E "(loki|promtail)"
 
 # Ver services
 kubectl get svc -n monitoring | grep loki
+
+# Aguardar pods ficarem prontos
+kubectl wait --for=condition=ready pod -l app=loki -n monitoring --timeout=300s
 ```
 
+
 ### **Passo 3: Configurar Loki no Grafana**
+
+> **🌐 IMPORTANTE - FQDNs no Kubernetes**: 
+> - **Formato**: `http://SERVICE_NAME.NAMESPACE.svc.cluster.local:PORT`
+> - **Loki**: `http://loki.monitoring.svc.cluster.local:3100`
+> - **Tempo**: `http://tempo.monitoring.svc.cluster.local:3200`
+> - **Prometheus**: `http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090`
+
 ```bash
 # No Grafana:
 # 1. Configuration → Data sources
 # 2. Add data source → Loki
-# 3. URL: http://loki:3100
+# 3. URL: http://loki.monitoring.svc.cluster.local:3100
 # 4. Save & test
+
+# ⚠️ IMPORTANTE: Usar sempre FQDN completo no Grafana
+# Nomes curtos (como "loki:3100") podem não resolver corretamente
+
+# Para verificar nomes dos serviços:
+kubectl get svc -n monitoring
 ```
 
 ### **Passo 4: Explorar Logs**
@@ -552,6 +656,9 @@ kubectl get svc -n monitoring | grep loki
 
 # Query 3: Rate de logs
 rate({namespace="default", app="weather-api"}[5m])
+
+# Query 4: Todos os labels disponíveis
+{namespace="default"}
 ```
 
 **✅ CHECKPOINT**: Logs centralizados no Loki
@@ -562,15 +669,15 @@ rate({namespace="default", app="weather-api"}[5m])
 
 ### **Passo 1: Deploy do Tempo**
 ```bash
-# Aplicar Tempo (já pronto)
+# Aplicar Tempo otimizado para EKS
 kubectl apply -f k8s/monitoring/tempo.yaml
 
-# Verificar
+# Verificar pods e services
 kubectl get pods -n monitoring | grep tempo
 kubectl get svc -n monitoring | grep tempo
 
 # Aguardar pod ficar pronto
-kubectl wait --for=condition=ready pod -l app=tempo -n monitoring --timeout=120s
+kubectl wait --for=condition=ready pod -l app=tempo -n monitoring --timeout=300s
 ```
 
 ### **Passo 2: Atualizar Aplicação para Tempo**
@@ -588,8 +695,11 @@ kubectl rollout status deployment weather-api
 # No Grafana:
 # 1. Configuration → Data sources
 # 2. Add data source → Tempo
-# 3. URL: http://tempo:3200
+# 3. URL: http://tempo.monitoring.svc.cluster.local:3200
 # 4. Save & test
+
+# ⚠️ IMPORTANTE: Usar FQDN completo (como mostrado acima)
+# Formato: http://SERVICE_NAME.NAMESPACE.svc.cluster.local:PORT
 ```
 
 ### **Passo 4: Testar Traces**
@@ -760,74 +870,12 @@ aws eks delete-nodegroup --cluster-name $CLUSTER_NAME --nodegroup-name fiap-node
 # Aguardar node group ser deletado
 aws eks wait nodegroup-deleted --cluster-name $CLUSTER_NAME --nodegroup-name fiap-nodegroup --region $AWS_REGION --profile $AWS_PROFILE
 
+# Deletar repositório ECR
+aws ecr delete-repository --repository-name fiap-weather-api --force --region $AWS_REGION --profile $AWS_PROFILE
+
 # Deletar cluster (CUIDADO!)
 aws eks delete-cluster --name $CLUSTER_NAME --region $AWS_REGION --profile $AWS_PROFILE
 ```
-
----
-
-## 💡 **RECOMENDAÇÕES PARA AMBIENTES DIFERENTES**
-
-### **🏠 Para Desenvolvimento Local**
-```bash
-# Use o HANDS-ON-LOCAL.md que oferece:
-# ✅ Sem custos de cloud
-# ✅ Sem limitações de IAM
-# ✅ Desenvolvimento rápido
-# ✅ Funciona offline
-# ✅ Recursos dedicados da máquina
-```
-
-### **☁️ Para AWS Learner Lab**
-```bash
-# Limitações conhecidas:
-# ❌ Não permite criação de roles IAM
-# ❌ Não permite criação de clusters EKS
-# ❌ Limitações de budget e recursos
-
-# Alternativas:
-# 1. Use HANDS-ON-LOCAL.md (recomendado)
-# 2. Use cluster EKS pré-existente (se disponível)
-# 3. Foque nos conceitos teóricos
-```
-
-### **🏢 Para Ambiente Corporativo/Pessoal**
-```bash
-# Use este HANDS-ON-COMPLETO.md que oferece:
-# ✅ Ambiente de produção real
-# ✅ Multi-node cluster
-# ✅ Auto scaling
-# ✅ Integração completa AWS
-# ✅ Alta disponibilidade
-```
-
----
-
-## 📚 **RESUMO DO QUE APRENDEMOS**
-
-### **✅ Conceitos Implementados**
-- [x] **3 Pilares da Observabilidade**: Métricas, Logs, Traces
-- [x] **Prometheus**: Coleta e armazenamento de métricas
-- [x] **Grafana**: Visualização unificada e dashboards
-- [x] **Loki**: Agregação de logs estruturados
-- [x] **Tempo**: Distributed tracing
-- [x] **OpenTelemetry**: Instrumentação moderna
-- [x] **Kubernetes**: Orquestração e service discovery
-- [x] **Alerting**: Monitoramento proativo
-
-### **🎯 Skills Desenvolvidas**
-- [x] **Deploy de aplicações** instrumentadas no Kubernetes
-- [x] **Configuração de monitoramento** completo
-- [x] **Criação de dashboards** efetivos
-- [x] **Troubleshooting** usando observabilidade
-- [x] **Correlação de dados** entre métricas, logs e traces
-
-### **💡 Melhores Práticas Demonstradas**
-- [x] **Instrumentação nativa** com OpenTelemetry
-- [x] **Separação de concerns** (métricas vs logs vs traces)
-- [x] **Dashboards hierárquicos** (overview → drill-down)
-- [x] **Alertas inteligentes** com thresholds apropriados
-- [x] **Correlação automática** entre diferentes tipos de dados
 
 ---
 
@@ -835,4 +883,3 @@ aws eks delete-cluster --name $CLUSTER_NAME --region $AWS_REGION --profile $AWS_
 
 **Professor:** José Neto  
 **Curso:** Arquitetura de Sistemas .NET - FIAP POS Tech  
-**Duração:** 90 minutos hands-on

@@ -21,7 +21,7 @@ graph LR
         USER[Aluno/Professor]
     end
     
-    subgraph "☁️ AWS EKS - us-east-1"
+    subgraph "☁️ AWS EKS - us-west-2"
         subgraph "📦 Aplicação"
             APP[Weather API<br/>.NET 8]
         end
@@ -95,7 +95,7 @@ helm version
 
 # Configurar AWS (usar profile fiapaws no Learner Lab)
 export AWS_PROFILE=fiapaws
-export AWS_DEFAULT_REGION=us-east-1
+export AWS_DEFAULT_REGION=us-west-2
 aws sts get-caller-identity
 ```
 

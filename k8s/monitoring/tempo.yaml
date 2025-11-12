@@ -1,72 +1,3 @@
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: tempo
-  namespace: monitoring
-  labels:
-    app: tempo
-    component: tempo
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: tempo
-  template:
-    metadata:
-      labels:
-        app: tempo
-        component: tempo
-    spec:
-      containers:
-      - name: tempo
-        image: grafana/tempo:2.3.0
-        args:
-        - -config.file=/etc/tempo/tempo.yaml
-        - -mem-ballast-size-mbs=1024
-        ports:
-        - containerPort: 3200
-          name: http
-        - containerPort: 14268
-          name: jaeger-http
-        - containerPort: 14250
-          name: jaeger-grpc
-        - containerPort: 9411
-          name: zipkin
-        - containerPort: 4317
-          name: otlp-grpc
-        - containerPort: 4318
-          name: otlp-http
-        resources:
-          requests:
-            cpu: 100m
-            memory: 128Mi
-          limits:
-            cpu: 500m
-            memory: 512Mi
-        volumeMounts:
-        - name: tempo-config
-          mountPath: /etc/tempo
-        - name: tempo-storage
-          mountPath: /tmp/tempo
-        readinessProbe:
-          httpGet:
-            path: /ready
-            port: 3200
-          initialDelaySeconds: 10
-          periodSeconds: 5
-        livenessProbe:
-          httpGet:
-            path: /ready
-            port: 3200
-          initialDelaySeconds: 30
-          periodSeconds: 10
-      volumes:
-      - name: tempo-config
-        configMap:
-          name: tempo-config
-      - name: tempo-storage
-        emptyDir: {}
----
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -79,7 +10,7 @@ data:
     server:
       http_listen_port: 3200
       log_level: info
-
+      
     distributor:
       receivers:
         jaeger:
@@ -96,32 +27,30 @@ data:
               endpoint: 0.0.0.0:4318
             grpc:
               endpoint: 0.0.0.0:4317
-
+              
     ingester:
       trace_idle_period: 10s
       max_block_bytes: 1_000_000
       max_block_duration: 5m
-
+      
     compactor:
       compaction:
         compaction_window: 1h
         max_block_bytes: 100_000_000
         block_retention: 1h
-        compacted_block_retention: 10m
-
+        
     storage:
       trace:
         backend: local
-        block:
-          bloom_filter_false_positive: .05
-          index_downsample_bytes: 1000
-          encoding: zstd
         local:
           path: /tmp/tempo/traces
-        pool:
-          max_workers: 100
-          queue_depth: 10000
-
+        wal:
+          path: /tmp/tempo/wal
+          
+    querier:
+      frontend_worker:
+        frontend_address: localhost:9095
+        
     query_frontend:
       search:
         duration_slo: 5s
@@ -129,11 +58,93 @@ data:
       trace_by_id:
         duration_slo: 5s
 
-    querier:
-      max_concurrent_queries: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo
+  namespace: monitoring
+  labels:
+    app: tempo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tempo
+  template:
+    metadata:
+      labels:
+        app: tempo
+    spec:
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+      - name: tempo
+        image: grafana/tempo:2.3.0
+        args:
+        - -config.file=/etc/tempo/tempo.yaml
+        - -mem-ballast-size-mbs=512
+        ports:
+        - containerPort: 3200
+          name: http
+        - containerPort: 14268
+          name: jaeger-http
+        - containerPort: 14250
+          name: jaeger-grpc
+        - containerPort: 9411
+          name: zipkin
+        - containerPort: 4317
+          name: otlp-grpc
+        - containerPort: 4318
+          name: otlp-http
+        - containerPort: 9095
+          name: grpc
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 10001
+        volumeMounts:
+        - name: tempo-config
+          mountPath: /etc/tempo
+        - name: tempo-storage
+          mountPath: /tmp/tempo
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3200
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 1
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /ready
+            port: 3200
+          initialDelaySeconds: 45
+          periodSeconds: 15
+          timeoutSeconds: 1
+          failureThreshold: 3
+      volumes:
+      - name: tempo-config
+        configMap:
+          name: tempo-config
+      - name: tempo-storage
+        emptyDir:
+          sizeLimit: 5Gi
 
-    usage_report:
-      reporting_enabled: false
 ---
 apiVersion: v1
 kind: Service
@@ -142,7 +153,6 @@ metadata:
   namespace: monitoring
   labels:
     app: tempo
-    component: tempo
 spec:
   type: ClusterIP
   ports:
@@ -170,8 +180,13 @@ spec:
     port: 4318
     targetPort: 4318
     protocol: TCP
+  - name: grpc
+    port: 9095
+    targetPort: 9095
+    protocol: TCP
   selector:
     app: tempo
+
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -180,6 +195,7 @@ metadata:
   namespace: monitoring
   labels:
     app: tempo
+    release: prometheus
 spec:
   selector:
     matchLabels:

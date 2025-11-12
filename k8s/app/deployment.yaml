@@ -22,8 +22,8 @@ spec:
     spec:
       containers:
       - name: weather-api
-        image: fiap-weather-api:v1
-        imagePullPolicy: Never  # Usar imagem local do Docker
+        image: 706637250273.dkr.ecr.us-west-2.amazonaws.com/fiap-weather-api:v2
+        imagePullPolicy: Always  # Sempre baixar do ECR
         ports:
         - containerPort: 80
           name: http
